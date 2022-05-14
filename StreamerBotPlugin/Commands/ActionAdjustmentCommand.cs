@@ -24,6 +24,7 @@ namespace Loupedeck.StreamerBotPlugin.Commands
 {
     using System;
     using System.Linq;
+    using System.Collections.Concurrent;
 
     using Services;
 
@@ -33,6 +34,8 @@ namespace Loupedeck.StreamerBotPlugin.Commands
     {
         private readonly HttpService _httpService;
         private Action[] _actions;
+
+        internal static readonly ConcurrentDictionary<String, Int32> ActionAdjustmentValues = new();
 
         public ActionAdjustmentCommand() : base("Adjustment Action", "Choose and execute your actions with adjustments (Reset sets it to 0)", "Adjustment Action", true)
         {
@@ -54,7 +57,12 @@ namespace Loupedeck.StreamerBotPlugin.Commands
                 var node = tree.Root.AddNode(actionGroup.Key);
 
                 foreach (var item in actionGroup.Where(action => action.Enabled))
-                {                
+                {
+                    if (!ActionAdjustmentValues.ContainsKey(item.Id))
+                    {
+                        ActionAdjustmentValues.TryAdd(item.Id, 0);
+                    }
+
                     node.AddItem(item.Id, item.Name, $"Execute {item.Name}");
                 }
             });
@@ -71,7 +79,9 @@ namespace Loupedeck.StreamerBotPlugin.Commands
                 return;
             }
 
+            ActionAdjustmentValues.AddOrUpdate(action.Id, 0, (key, oldValue) => 0);
             this._httpService.ExecuteActionValue(action.Id, 0);
+            this.AdjustmentValueChanged(actionParameter);
         }
 
         protected override void ApplyAdjustment(String actionParameter, Int32 diff)
@@ -83,8 +93,31 @@ namespace Loupedeck.StreamerBotPlugin.Commands
                 return;
             }
 
-            this._httpService.ExecuteActionValue(action.Id, diff);
+            ActionAdjustmentValues.AddOrUpdate(action.Id, diff, (key, oldValue) =>
+            {
+                var retVal = Clamp(oldValue + diff, 0, 99);
+
+                if (retVal == 99 && oldValue == 0)
+                {
+                    return retVal = 0;
+                }
+
+                if (retVal != oldValue)
+                {
+                    this._httpService.ExecuteActionValue(action.Id, diff);
+                    this.AdjustmentValueChanged(actionParameter);
+                }
+
+                return retVal;
+            });
+
         }
+        
+        internal static Int32 Clamp(Int32 value, Int32 min, Int32 max) =>
+           (value < min) ? min : (value > max) ? max : value;
+
+        protected override String GetAdjustmentValue(String actionParameter) =>
+            ActionAdjustmentValues.ContainsKey(actionParameter ?? String.Empty) ? $"({ActionAdjustmentValues[actionParameter]})" : $"(0)";
 
         protected override String GetAdjustmentDisplayName(String actionParameter, PluginImageSize imageSize) =>
             this._actions.FirstOrDefault(a => actionParameter is not null && a.Id == actionParameter)?.Name ?? base.GetCommandDisplayName(actionParameter, imageSize);
